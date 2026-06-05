@@ -1,0 +1,28 @@
+{
+  "name": "before-move",
+  "version": "1.0.0",
+  "description": "Crypto Order Flow & Anomaly Detection Engine — detect institutional position build-up before major price moves.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "dev:once": "tsx src/index.ts"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["order-flow", "crypto", "volume-delta", "open-interest", "anomaly-detection"],
+  "license": "PRIVATE",
+  "dependencies": {
+    "ws": "^8.18.0",
+    "sql.js": "^1.11.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.0"
+  }
+}
