@@ -1,4 +1,5 @@
 // Quick one-shot scanner — fetches live data and prints a report
+// Now matches the EXACT same filters as the live engine.
 const BYBIT = 'https://api.bybit.com';
 
 interface CoinScan {
@@ -57,19 +58,37 @@ async function scan() {
         const priceChange4hPct = price4h > 0 ? ((price - price4h) / price4h) * 100 : 0;
         const priceChange24hPct = price24h > 0 ? ((price - price24h) / price24h) * 100 : 0;
 
-        // Verdict logic
+        // === EXACT SAME LOGIC AS LIVE ENGINE ===
+
         let verdict = '—';
+
+        // God Setup 1: Breakout Coil
         const hasMacroBuild = oiChange4hPct > 15 || oiChange24hPct > 25;
-        const isCompressed = Math.abs(priceChange4hPct) < 4;
-        const isBearishTop = priceChange24hPct > 15 && fundingRate > 0.0003;
+        const isCompressed = Math.abs(priceChange4hPct) < 5;
+        const isMaxGreed = fundingRate > 0.0005;
+        const isMaxFear = fundingRate < -0.0005;
 
         if (hasMacroBuild && isCompressed) {
-          if (fundingRate < -0.0001) verdict = '🚨 COIL → BULLISH (shorts trapped)';
-          else if (fundingRate > 0.0001) verdict = '🚨 COIL → BEARISH (longs trapped)';
-          else verdict = '⚠️ COIL building (direction unclear)';
-        } else if (isBearishTop) {
-          verdict = '🚨 BEARISH TOP (greedy longs, pump exhaustion)';
-        } else if (oiChange4hPct > 10) {
+          // Check funding filter
+          if (fundingRate < -0.0001) {
+            if (!isMaxFear) verdict = '🚨 COIL READY → Waiting for BULLISH breakout (shorts trapped)';
+            else verdict = '⛔ COIL but funding at MAX FEAR — blocked';
+          } else if (fundingRate > 0.0001) {
+            if (!isMaxGreed) verdict = '🚨 COIL READY → Waiting for BEARISH breakout (longs trapped)';
+            else verdict = '⛔ COIL but funding at MAX GREED — blocked';
+          } else {
+            verdict = '🚨 COIL READY → Waiting for breakout (direction unclear)';
+          }
+        }
+
+        // God Setup 2: Bearish Top
+        const isBearishTop = priceChange24hPct > 15 && fundingRate > 0.0003;
+        if (isBearishTop && verdict === '—') {
+          verdict = '🚨 BEARISH TOP — pump exhaustion + greedy funding';
+        }
+
+        // Watchlist (building up, not ready)
+        if (verdict === '—' && oiChange4hPct > 10) {
           verdict = '👀 OI rising fast — WATCH';
         }
 
@@ -90,9 +109,10 @@ async function scan() {
 
   console.log('\n' + '═'.repeat(90));
   console.log('  🧠 BEFORE-MOVE MACRO SCAN — ' + new Date().toISOString());
+  console.log('  Filters: OI>15%(4H) | Price<5%(4H) | 15m FullBody>75% | Delta>30% | Funding Trap');
   console.log('═'.repeat(90));
 
-  console.log('\n── 🚨 GOD SETUPS (Trade These) ──────────────────────────────────────');
+  console.log('\n── 🚨 GOD SETUPS (Coiled & Ready — Need 15m Breakout Candle to Fire) ──');
   const godSetups = results.filter(r => r.verdict.startsWith('🚨'));
   if (godSetups.length === 0) {
     console.log('  None detected right now. Market is quiet. Be patient.');
@@ -103,6 +123,16 @@ async function scan() {
       console.log(`    OI Δ(4h): ${c.oiChange4hPct >= 0 ? '+' : ''}${c.oiChange4hPct.toFixed(2)}%   OI Δ(24h): ${c.oiChange24hPct >= 0 ? '+' : ''}${c.oiChange24hPct.toFixed(2)}%`);
       console.log(`    Price Δ(4h): ${c.priceChange4hPct >= 0 ? '+' : ''}${c.priceChange4hPct.toFixed(2)}%   Price Δ(24h): ${c.priceChange24hPct >= 0 ? '+' : ''}${c.priceChange24hPct.toFixed(2)}%`);
       console.log(`    Funding: ${(c.fundingRate * 100).toFixed(4)}%   Vol(24h): $${(c.vol24h / 1e9).toFixed(2)}B`);
+    }
+  }
+
+  console.log('\n── ⛔ BLOCKED (Coiled but Funding Too Extreme) ─────────────────────');
+  const blocked = results.filter(r => r.verdict.startsWith('⛔'));
+  if (blocked.length === 0) {
+    console.log('  None blocked.');
+  } else {
+    for (const c of blocked) {
+      console.log(`  ${c.symbol.padEnd(12)} ${c.verdict}   Funding: ${(c.fundingRate * 100).toFixed(4)}%`);
     }
   }
 

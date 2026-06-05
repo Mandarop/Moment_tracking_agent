@@ -1,0 +1,19 @@
+services:
+  - type: worker
+    name: before-move-engine
+    env: node
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    # We mount a persistent disk so the SQLite database survives restarts
+    disk:
+      name: data-storage
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 20.10.0
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

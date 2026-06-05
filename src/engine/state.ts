@@ -272,8 +272,15 @@ export class StateAggregator {
 
   /** Get the price range (high-low as %) over the last N minutes */
   getPriceRangePct(symbol: string, minutes: number): number {
+    const candle = this.getRecentCandle(symbol, minutes);
+    if (!candle || candle.low === 0) return 0;
+    return ((candle.high - candle.low) / candle.low) * 100;
+  }
+
+  /** Get a synthesized OHLC candle for the last N minutes */
+  getRecentCandle(symbol: string, minutes: number): { open: number; high: number; low: number; close: number } | null {
     const buckets = this.getRecentBuckets(symbol, minutes);
-    if (buckets.length === 0) return 0;
+    if (buckets.length === 0) return null;
 
     let high = -Infinity;
     let low = Infinity;
@@ -282,8 +289,12 @@ export class StateAggregator {
       low = Math.min(low, b.low);
     }
 
-    if (low === 0) return 0;
-    return ((high - low) / low) * 100;
+    return {
+      open: buckets[0].open,
+      high,
+      low,
+      close: buckets[buckets.length - 1].close
+    };
   }
 
   /** Get the net delta (buy - sell volume in USD) over the last N minutes */

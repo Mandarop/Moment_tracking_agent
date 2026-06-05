@@ -247,12 +247,19 @@ async function main(): Promise<void> {
     printStatus(aggregator);
   }, 30_000);
 
+  // Refresh historical baselines every 4 hours so macro OI/price calculations stay accurate
+  const historyRefreshInterval = setInterval(async () => {
+    logger.info('HISTORY', '🔄 Refreshing 4H/24H historical baselines...');
+    await populateHistoricalData(discovery.symbols, aggregator);
+  }, 4 * 60 * 60 * 1000); // 4 hours
+
   // --- Graceful Shutdown ---
 
   const shutdown = (): void => {
     logger.info('MAIN', '🛑 Shutting down gracefully...');
     clearInterval(evalInterval);
     clearInterval(statusInterval);
+    clearInterval(historyRefreshInterval);
     bybitWs.shutdown();
     storage.close();
     logger.info('MAIN', '✅ Shutdown complete. Goodbye.');

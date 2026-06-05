@@ -31,31 +31,25 @@ function hasAbsorptionTrigger(agg: StateAggregator, symbol: string): boolean {
   return volRatio > 2.0 && priceRange < 0.2; // 2x volume but tight range
 }
 
-/** Returns the direction of CVD divergence on 5m chart, or null */
-function getCvdDivergenceTrigger(agg: StateAggregator, symbol: string, threshold: number): 'BULLISH' | 'BEARISH' | null {
-  const priceChange = agg.getPriceChangePct(symbol, 5);
-  const netDelta = agg.getNetDelta(symbol, 5);
-
-  if (Math.abs(priceChange) < 0.1 || Math.abs(netDelta) < threshold * 0.3) return null;
-
-  if (priceChange > 0 && netDelta < -threshold * 0.3) return 'BEARISH'; // Price up, smart money selling
-  if (priceChange < 0 && netDelta > threshold * 0.3) return 'BULLISH';  // Price down, smart money buying
-  
-  return null;
-}
 
 
-// ===== GOD SETUP 1: THE MACRO COIL (Breakout) =====
-// High timeframe position build-up + tight range + trapped funding.
-// A directional explosion is inevitable.
 
-function detectMacroCoil(
+// ===== GOD SETUP 1: THE BREAKOUT TRIGGER =====
+// Tracks a consolidated market with heavy position build-up,
+// and fires the EXACT moment price violently breaks out.
+
+function detectBreakout(
   agg: StateAggregator,
   cfg: SymbolConfig
 ): Signal | null {
   const symbol = cfg.symbol;
   const state = agg.getState(symbol);
   if (!state || !state.historicalBaselines) return null;
+
+  // 0. The Funding Filter (No Trap Rule)
+  // Max greed = > 0.05%. Max fear = < -0.05%.
+  const isMaxGreed = state.fundingRate > 0.0005; 
+  const isMaxFear = state.fundingRate < -0.0005;
 
   // 1. Context: Macro Position Build-Up
   const oiChange4h = agg.getMacroOiChangePct(symbol, '4h');
@@ -65,40 +59,61 @@ function detectMacroCoil(
   const hasMacroBuildUp = oiChange4h > 15 || oiChange24h > 25;
   if (!hasMacroBuildUp) return null;
 
-  // 2. Context: Volatility Compression
+  // 2. Context: Volatility Compression (The Consolidation)
   const priceChange4h = agg.getMacroPriceChangePct(symbol, '4h');
-  // Price hasn't moved much despite huge money entering
-  if (Math.abs(priceChange4h) > 4.0) return null; 
+  // If price moved > 5% over 4h, it's not a tight consolidation, it's already trending
+  if (Math.abs(priceChange4h) > 5.0) return null; 
 
-  // 3. Trigger: Micro Catalyst
-  // We need a micro event to time the entry
-  const isAbsorbing = hasAbsorptionTrigger(agg, symbol);
-  const divergence = getCvdDivergenceTrigger(agg, symbol, cfg.deltaDivergenceThreshold);
-  
-  if (!isAbsorbing && !divergence) return null;
+  // 3. Trigger: The Live Breakout (15m scale)
+  const candle15m = agg.getRecentCandle(symbol, 15);
+  if (!candle15m) return null;
 
-  // Determine Direction
-  let direction: SignalDirection = 'NEUTRAL';
-  // Use funding rate to see who is trapped. Negative funding = shorts are paying longs.
-  if (state.fundingRate < -0.0001) direction = 'BULLISH'; // Shorts are trapped, short squeeze incoming
-  else if (state.fundingRate > 0.0001) direction = 'BEARISH'; // Longs trapped
-  else if (divergence) direction = divergence; // Follow the smart money CVD
+  const priceChange15m = ((candle15m.close - candle15m.open) / candle15m.open) * 100;
   
-  // We have a God Setup.
+  // Need a sudden spike in price (> 1.2% in 15 minutes)
+  const isBreakingOut = Math.abs(priceChange15m) > 1.2;
+  if (!isBreakingOut) return null;
+
+  const direction: SignalDirection = priceChange15m > 0 ? 'BULLISH' : 'BEARISH';
+
+  // Apply Funding Filter Block
+  if (direction === 'BULLISH' && isMaxGreed) return null; // Block long if longs are overleveraged
+  if (direction === 'BEARISH' && isMaxFear) return null;  // Block short if shorts are overleveraged
+
+  // 4. Filter: The 75% Full Body Rule
+  const totalRange = candle15m.high - candle15m.low;
+  if (totalRange === 0) return null;
+  
+  const bodySize = Math.abs(candle15m.close - candle15m.open);
+  const bodyRatio = bodySize / totalRange;
+  if (bodyRatio < 0.75) return null; // Too much wick, liquidity sweep fakeout
+
+  // 5. Filter: Delta Dominance
+  const vol15m = agg.getTotalVolume(symbol, 15);
+  const delta15m = agg.getNetDelta(symbol, 15);
+  if (vol15m === 0) return null;
+  
+  const deltaRatio = Math.abs(delta15m) / vol15m;
+  if (deltaRatio < 0.3) return null; // Delta must account for >30% of total volume
+
+  // Ensure Delta matches price direction
+  if (direction === 'BULLISH' && delta15m < 0) return null;
+  if (direction === 'BEARISH' && delta15m > 0) return null;
+  
   return {
-    id: signalId('COILED_SPRING', symbol),
+    id: signalId('COILED_SPRING', symbol), // Keeping internal type name
     type: 'COILED_SPRING',
     direction,
     urgency: 'CRITICAL',
     symbol,
     price: state.lastPrice,
-    message: `🚨 GOD SETUP: MACRO COIL BREAKOUT on ${symbol} 🚨\n\nMassive structural trap detected. OI is up ${Math.max(oiChange4h, oiChange24h).toFixed(1)}% while price is compressed. A violent 4H/24H breakout is imminent. Funding rate (${(state.fundingRate * 100).toFixed(4)}%) and order flow suggest a ${direction} release.`,
+    message: `🚨 BREAKOUT ALERT: ${symbol} is breaking out of a 4H consolidation! 🚨\n\nPositions built up massively (+${Math.max(oiChange4h, oiChange24h).toFixed(1)}% OI). Price just broke out ${direction} by ${Math.abs(priceChange15m).toFixed(2)}% in a clean 15m full-body candle (Body Ratio: ${(bodyRatio * 100).toFixed(0)}%). Strong aggressive delta confirms the trend.`,
     metadata: {
       oiChange4hPct: oiChange4h,
-      oiChange24hPct: oiChange24h,
-      priceChange4hPct: priceChange4h,
+      priceChange15mPct: priceChange15m,
+      bodyRatio: bodyRatio,
+      deltaRatio: deltaRatio,
       fundingRate: state.fundingRate,
-      microTrigger: isAbsorbing ? 'ABSORPTION' : 'DIVERGENCE',
     },
     timestamp: Date.now(),
   };
@@ -176,7 +191,7 @@ export class AnomalyDetector {
     for (const cfg of this.symbolConfigs) {
       // Only run the two God Setups. Micro-noise strategies are disabled.
       const strategies = [
-        detectMacroCoil,
+        detectBreakout,
         detectBearishTop
       ];
 
