@@ -13,9 +13,9 @@ import { logger } from '../utils/logger.js';
 import type { SignalDirection } from '../types.js';
 import type { PullbackSignal } from './pullbackDetector.js';
 import type { Timeframe } from './emaCalculator.js';
+import type { Storage } from '../db/storage.js';
 
 /** Paper trading configuration */
-const PAPER_BALANCE = 10_000;   // $10,000 simulated balance
 const RISK_PER_TRADE_PCT = 2;   // Risk 2% of balance per trade
 const RISK_REWARD_RATIO = 2;    // 1:2 risk-reward
 const TRAILING_STOP_TRIGGER = 1.5; // Move SL to breakeven when 1.5% in profit
@@ -51,8 +51,41 @@ function generateTradeId(symbol: string, timeframe: Timeframe): string {
 }
 
 export class PaperTrader {
+  private timeframe: Timeframe;
+  private storage: Storage;
+  private balance: number = 10_000;
   private openPositions: Map<string, PaperTrade> = new Map();
   private closedTrades: PaperTrade[] = [];
+
+  constructor(timeframe: Timeframe, storage: Storage) {
+    this.timeframe = timeframe;
+    this.storage = storage;
+    this.initFromDatabase();
+  }
+
+  /**
+   * Load previous closed trades and open trades from SQLite
+   * to restore account state and balance.
+   */
+  private initFromDatabase(): void {
+    try {
+      const closed = this.storage.getPaperTradesForTimeframe(this.timeframe, false);
+      const closedPnl = closed.reduce((sum, t) => sum + (t.pnlUsd || 0), 0);
+      this.balance = 10_000 + closedPnl;
+      this.closedTrades = closed;
+
+      const open = this.storage.getPaperTradesForTimeframe(this.timeframe, true);
+      for (const trade of open) {
+        this.openPositions.set(trade.symbol, trade);
+      }
+
+      logger.info('PAPER', `🤖 Restored [${this.timeframe}m] paper trading account:`);
+      logger.info('PAPER', `   Simulated Capital: $${this.balance.toFixed(2)}`);
+      logger.info('PAPER', `   Positions: ${this.openPositions.size} open | ${this.closedTrades.length} closed`);
+    } catch (err) {
+      logger.error('PAPER', `Failed to initialize [${this.timeframe}m] trader from DB`, { error: String(err) });
+    }
+  }
 
   /**
    * Open a new paper trade based on a pullback signal.
@@ -63,27 +96,22 @@ export class PaperTrader {
     signalId: string,
     convictionScore: number
   ): PaperTrade | null {
-    // Block if max open positions reached for this timeframe
-    const timeframeOpenCount = Array.from(this.openPositions.values())
-      .filter(pos => pos.timeframe === pullback.timeframe).length;
-
-    if (timeframeOpenCount >= MAX_OPEN_POSITIONS) {
-      logger.warn('PAPER', `⛔ Max open positions (${MAX_OPEN_POSITIONS}) reached for ${pullback.timeframe}m chart. Skipping ${pullback.symbol}.`);
+    // Block if max open positions reached
+    if (this.openPositions.size >= MAX_OPEN_POSITIONS) {
+      logger.warn('PAPER', `⛔ Max open positions (${MAX_OPEN_POSITIONS}) reached for ${this.timeframe}m chart. Skipping ${pullback.symbol}.`);
       return null;
     }
 
-    const key = `${pullback.symbol}:${pullback.timeframe}`;
-
-    // Block if already have a position on this symbol and timeframe
-    if (this.openPositions.has(key)) {
-      logger.warn('PAPER', `⛔ Already have an open position on ${pullback.symbol} (${pullback.timeframe}m). Skipping.`);
+    // Block if already have a position on this symbol
+    if (this.openPositions.has(pullback.symbol)) {
+      logger.warn('PAPER', `⛔ Already have an open position on ${pullback.symbol} (${this.timeframe}m). Skipping.`);
       return null;
     }
 
     const { entryPrice, stopLoss, direction, symbol, pattern, timeframe } = pullback;
 
-    // Calculate position size based on risk
-    const riskAmount = PAPER_BALANCE * (RISK_PER_TRADE_PCT / 100); // $200
+    // Calculate position size based on current capital balance risk
+    const riskAmount = this.balance * (RISK_PER_TRADE_PCT / 100);
     const slDistance = Math.abs(entryPrice - stopLoss);
     const slDistancePct = (slDistance / entryPrice) * 100;
 
@@ -124,13 +152,13 @@ export class PaperTrader {
       trailingActivated: false,
     };
 
-    this.openPositions.set(key, trade);
+    this.openPositions.set(symbol, trade);
 
     logger.signal('PAPER', `📝 PAPER TRADE OPENED: ${direction} ${symbol} (${timeframe}m)`, {
       entry: `$${entryPrice}`,
       stopLoss: `$${stopLoss.toFixed(4)}`,
       takeProfit: `$${takeProfit.toFixed(4)}`,
-      risk: `$${riskAmount.toFixed(0)}`,
+      risk: `$${riskAmount.toFixed(2)}`,
       size: `$${positionSizeUsd.toFixed(0)}`,
       pattern,
       rr: `1:${RISK_REWARD_RATIO}`,
@@ -149,8 +177,8 @@ export class PaperTrader {
   checkPositions(currentPrices: Map<string, number>): PaperTrade[] {
     const closedThisTick: PaperTrade[] = [];
 
-    for (const [, trade] of this.openPositions) {
-      const price = currentPrices.get(trade.symbol);
+    for (const [symbol, trade] of this.openPositions) {
+      const price = currentPrices.get(symbol);
       if (!price) continue;
 
       // Check for trailing stop activation
@@ -208,6 +236,9 @@ export class PaperTrader {
     }
     trade.pnlUsd = trade.positionSizeUsd * (trade.pnlPct / 100);
 
+    // Update account balance
+    this.balance += trade.pnlUsd;
+
     // Determine status
     if (trade.trailingActivated && trade.stopLoss === trade.entryPrice && !isWin) {
       trade.status = 'BREAKEVEN';
@@ -216,7 +247,7 @@ export class PaperTrader {
     }
 
     // Remove from open, add to closed
-    this.openPositions.delete(`${trade.symbol}:${trade.timeframe}`);
+    this.openPositions.delete(trade.symbol);
     this.closedTrades.push(trade);
 
     const emoji = trade.status === 'WIN' ? '✅' : trade.status === 'BREAKEVEN' ? '🔄' : '❌';
@@ -224,6 +255,7 @@ export class PaperTrader {
       entry: `$${trade.entryPrice}`,
       exit: `$${exitPrice.toFixed(4)}`,
       pnl: `${trade.pnlPct!.toFixed(2)}% ($${trade.pnlUsd!.toFixed(2)})`,
+      balance: `$${this.balance.toFixed(2)}`,
       duration: `${((trade.exitTime - trade.entryTime) / 60_000).toFixed(0)} min`,
     });
   }
@@ -245,7 +277,7 @@ export class PaperTrader {
   /**
    * Get summary statistics for all closed trades.
    */
-  getStats(): { totalTrades: number; wins: number; losses: number; breakevens: number; totalPnlUsd: number; winRate: number } {
+  getStats(): { totalTrades: number; wins: number; losses: number; breakevens: number; totalPnlUsd: number; winRate: number; balance: number } {
     const wins = this.closedTrades.filter(t => t.status === 'WIN').length;
     const losses = this.closedTrades.filter(t => t.status === 'LOSS').length;
     const breakevens = this.closedTrades.filter(t => t.status === 'BREAKEVEN').length;
@@ -259,14 +291,15 @@ export class PaperTrader {
       breakevens,
       totalPnlUsd,
       winRate,
+      balance: this.balance,
     };
   }
 
   /**
-   * Check if a position is open for a given symbol and timeframe.
+   * Check if a position is open for a given symbol.
    */
-  hasPosition(symbol: string, timeframe: Timeframe): boolean {
-    return this.openPositions.has(`${symbol}:${timeframe}`);
+  hasPosition(symbol: string): boolean {
+    return this.openPositions.has(symbol);
   }
 
   get openCount(): number {

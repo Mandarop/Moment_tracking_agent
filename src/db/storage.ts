@@ -290,6 +290,39 @@ export class Storage {
     );
   }
 
+  /** Get paper trades for a specific timeframe (open or closed) */
+  getPaperTradesForTimeframe(timeframe: Timeframe, isOpen: boolean): PaperTrade[] {
+    const statusQuery = isOpen ? "status = 'OPEN'" : "status != 'OPEN'";
+    const results = this.db.exec(
+      `SELECT id, symbol, timeframe, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, exit_price, exit_time, pnl_pct, pnl_usd, status, trigger_signal_id, conviction_score, pattern
+       FROM paper_trades WHERE timeframe = '${timeframe}' AND ${statusQuery}`
+    );
+
+    if (results.length === 0) return [];
+
+    return results[0].values.map((row: unknown[]) => ({
+      id: row[0] as string,
+      symbol: row[1] as string,
+      timeframe: row[2] as Timeframe,
+      direction: row[3] as PaperTrade['direction'],
+      entryPrice: row[4] as number,
+      stopLoss: row[5] as number,
+      originalStopLoss: row[5] as number,
+      takeProfit: row[6] as number,
+      positionSizeUsd: row[7] as number,
+      entryTime: row[8] as number,
+      exitPrice: row[9] as number | null,
+      exitTime: row[10] as number | null,
+      pnlPct: row[11] as number | null,
+      pnlUsd: row[12] as number | null,
+      status: row[13] as PaperTrade['status'],
+      triggerSignalId: row[14] as string,
+      convictionScore: row[15] as number,
+      pattern: row[16] as string,
+      trailingActivated: false,
+    }));
+  }
+
   /** Get all open paper trades */
   getOpenPaperTrades(): PaperTrade[] {
     const results = this.db.exec(

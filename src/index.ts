@@ -142,19 +142,27 @@ async function main(): Promise<void> {
   // 4. Storage
   const storage = await Storage.create();
 
-  // 5. Trading Agent (Paper Trading — EMA Pullback Strategy)
-  const trader = new TradingAgent(storage);
+  // 5. Trading Agents (Paper Trading — EMA Pullback Strategy on 3m, 5m, and 15m)
+  const traders = [
+    new TradingAgent(storage, '3'),
+    new TradingAgent(storage, '5'),
+    new TradingAgent(storage, '15'),
+  ];
 
-  // Wire trade events to Discord notifications
-  trader.onTrade(async (trade, action) => {
-    await notifier.sendTradeAlert(trade, action);
-  });
+  // Wire trade events to Discord notifications for each agent
+  for (const trader of traders) {
+    trader.onTrade(async (trade, action) => {
+      await notifier.sendTradeAlert(trade, action);
+    });
+  }
 
   // 6. Wire signals
   detector.onSignal(async (signal) => {
     storage.saveSignal(signal);
     await notifier.send(signal);
-    trader.onSignal(signal); // Feed to trading agent watchlist
+    for (const trader of traders) {
+      trader.onSignal(signal); // Feed to each trading agent watchlist
+    }
   });
 
   // --- Phase 3: Connect to Exchanges ---
@@ -257,8 +265,10 @@ async function main(): Promise<void> {
     printStatus(aggregator);
   }, 30_000);
 
-  // Start the paper trading agent
-  trader.start();
+  // Start the paper trading agents
+  for (const trader of traders) {
+    trader.start();
+  }
 
   // Refresh historical baselines every 4 hours so macro OI/price calculations stay accurate
   const historyRefreshInterval = setInterval(async () => {
@@ -273,7 +283,9 @@ async function main(): Promise<void> {
     clearInterval(evalInterval);
     clearInterval(statusInterval);
     clearInterval(historyRefreshInterval);
-    trader.stop();
+    for (const trader of traders) {
+      trader.stop();
+    }
     bybitWs.shutdown();
     storage.close();
     logger.info('MAIN', '✅ Shutdown complete. Goodbye.');
