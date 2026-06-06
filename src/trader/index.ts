@@ -125,9 +125,35 @@ export class TradingAgent {
     if (symbolsToCheck.size === 0) return;
 
     const emaResults = await getEMADataBatch(Array.from(symbolsToCheck), this.timeframe);
+    
+    // Fetch 15m EMAs for macro trend filtering
+    const trendResults = this.timeframe === '15' ? emaResults : await getEMADataBatch(Array.from(symbolsToCheck), '15');
 
     // 3. Check for pullback setups on watchlisted coins
     for (const entry of entries) {
+      // Max SL Filter
+      if (this.paperTrader.hasHitMaxLosses(entry.symbol)) {
+        logger.warn('TRADER', `[${this.timeframe}m] ⛔ Removing ${entry.symbol} from watchlist — hit 3 consecutive stop losses.`);
+        this.watchlist.remove(entry.symbol, entry.direction);
+        continue;
+      }
+
+      // Trend Break Filter
+      const trendData = trendResults.get(entry.symbol);
+      if (trendData && trendData.candles.length > 0) {
+        // We use the last closed candle to confirm the trend break
+        const lastClosedCandle = trendData.candles[trendData.candles.length - 1];
+        if (entry.direction === 'BULLISH' && lastClosedCandle.close < trendData.ema50) {
+          logger.warn('TRADER', `[${this.timeframe}m] 📉 Trend broken for ${entry.symbol} (closed below 15m 50 EMA). Removing from watchlist.`);
+          this.watchlist.remove(entry.symbol, entry.direction);
+          continue;
+        } else if (entry.direction === 'BEARISH' && lastClosedCandle.close > trendData.ema50) {
+          logger.warn('TRADER', `[${this.timeframe}m] 📈 Trend broken for ${entry.symbol} (closed above 15m 50 EMA). Removing from watchlist.`);
+          this.watchlist.remove(entry.symbol, entry.direction);
+          continue;
+        }
+      }
+
       // Skip if we already have a position on this coin
       if (this.paperTrader.hasPosition(entry.symbol)) continue;
 
@@ -147,9 +173,6 @@ export class TradingAgent {
       if (trade) {
         // Save to SQLite
         this.storage.savePaperTrade(trade);
-
-        // Remove from watchlist (we've entered the trade)
-        this.watchlist.remove(entry.symbol, entry.direction);
 
         // Notify
         if (this.onTradeCallback) {

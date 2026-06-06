@@ -40,6 +40,7 @@ export interface EMAResult {
   timeframe: Timeframe;
   ema9: number;
   ema15: number;
+  ema50: number;
   /** Last 5 closed candles (newest last) for pattern detection */
   candles: Kline[];
   /** Current (possibly unclosed) candle */
@@ -82,8 +83,8 @@ function calculateEMA(closes: number[], period: number): number {
  */
 export async function getEMAData(symbol: string, interval: Timeframe = '15'): Promise<EMAResult | null> {
   try {
-    // Fetch 100 candles — enough for accurate EMA calculation
-    const url = `${BYBIT_REST}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=100`;
+    // Fetch 200 candles — enough for accurate 50 EMA calculation
+    const url = `${BYBIT_REST}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=200`;
     const res = await fetch(url);
     const data = await res.json() as any;
 
@@ -104,8 +105,8 @@ export async function getEMAData(symbol: string, interval: Timeframe = '15'): Pr
       volume: parseFloat(k[5]),
     }));
 
-    if (klines.length < 15) {
-      logger.warn('EMA', `Not enough klines for ${symbol} ${interval}m (${klines.length} < 15)`);
+    if (klines.length < 50) {
+      logger.warn('EMA', `Not enough klines for ${symbol} ${interval}m (${klines.length} < 50)`);
       return null;
     }
 
@@ -117,6 +118,7 @@ export async function getEMAData(symbol: string, interval: Timeframe = '15'): Pr
     const closes = closedCandles.map(k => k.close);
     const ema9 = calculateEMA(closes, 9);
     const ema15 = calculateEMA(closes, 15);
+    const ema50 = calculateEMA(closes, 50);
 
     // Return last 5 closed candles for pattern detection
     const recentCandles = closedCandles.slice(-5);
@@ -126,6 +128,7 @@ export async function getEMAData(symbol: string, interval: Timeframe = '15'): Pr
       timeframe: interval,
       ema9,
       ema15,
+      ema50,
       candles: recentCandles,
       currentCandle,
       timestamp: Date.now(),

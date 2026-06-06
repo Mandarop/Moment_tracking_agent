@@ -17,7 +17,7 @@ import type { Storage } from '../db/storage.js';
 
 /** Paper trading configuration */
 const RISK_PER_TRADE_PCT = 2;   // Risk 2% of balance per trade
-const RISK_REWARD_RATIO = 2;    // 1:2 risk-reward
+const RISK_REWARD_RATIO = 1.5;  // 1:1.5 risk-reward
 const TRAILING_STOP_TRIGGER = 1.5; // Move SL to breakeven when 1.5% in profit
 const MAX_OPEN_POSITIONS = 5;   // Don't overexpose
 
@@ -56,6 +56,7 @@ export class PaperTrader {
   private balance: number = 10_000;
   private openPositions: Map<string, PaperTrade> = new Map();
   private closedTrades: PaperTrade[] = [];
+  private consecutiveLosses: Map<string, number> = new Map();
 
   constructor(timeframe: Timeframe, storage: Storage) {
     this.timeframe = timeframe;
@@ -73,6 +74,18 @@ export class PaperTrader {
       const closedPnl = closed.reduce((sum, t) => sum + (t.pnlUsd || 0), 0);
       this.balance = 10_000 + closedPnl;
       this.closedTrades = closed;
+
+      // Reconstruct consecutive losses per symbol
+      // Sort trades from oldest to newest to replay the sequence
+      const sortedClosed = [...closed].sort((a, b) => (a.exitTime || 0) - (b.exitTime || 0));
+      for (const t of sortedClosed) {
+        if (t.status === 'LOSS') {
+          const current = this.consecutiveLosses.get(t.symbol) || 0;
+          this.consecutiveLosses.set(t.symbol, current + 1);
+        } else if (t.status === 'WIN') {
+          this.consecutiveLosses.set(t.symbol, 0);
+        }
+      }
 
       const open = this.storage.getPaperTradesForTimeframe(this.timeframe, true);
       for (const trade of open) {
@@ -246,6 +259,14 @@ export class PaperTrader {
       trade.status = isWin ? 'WIN' : 'LOSS';
     }
 
+    // Track consecutive losses
+    if (trade.status === 'LOSS') {
+      const current = this.consecutiveLosses.get(trade.symbol) || 0;
+      this.consecutiveLosses.set(trade.symbol, current + 1);
+    } else if (trade.status === 'WIN') {
+      this.consecutiveLosses.set(trade.symbol, 0);
+    }
+
     // Remove from open, add to closed
     this.openPositions.delete(trade.symbol);
     this.closedTrades.push(trade);
@@ -304,5 +325,12 @@ export class PaperTrader {
 
   get openCount(): number {
     return this.openPositions.size;
+  }
+
+  /**
+   * Check if a symbol has hit 3 consecutive stop losses
+   */
+  hasHitMaxLosses(symbol: string): boolean {
+    return (this.consecutiveLosses.get(symbol) || 0) >= 3;
   }
 }
