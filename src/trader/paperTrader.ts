@@ -63,9 +63,12 @@ export class PaperTrader {
     signalId: string,
     convictionScore: number
   ): PaperTrade | null {
-    // Block if max open positions reached
-    if (this.openPositions.size >= MAX_OPEN_POSITIONS) {
-      logger.warn('PAPER', `⛔ Max open positions (${MAX_OPEN_POSITIONS}) reached. Skipping ${pullback.symbol} (${pullback.timeframe}m).`);
+    // Block if max open positions reached for this timeframe
+    const timeframeOpenCount = Array.from(this.openPositions.values())
+      .filter(pos => pos.timeframe === pullback.timeframe).length;
+
+    if (timeframeOpenCount >= MAX_OPEN_POSITIONS) {
+      logger.warn('PAPER', `⛔ Max open positions (${MAX_OPEN_POSITIONS}) reached for ${pullback.timeframe}m chart. Skipping ${pullback.symbol}.`);
       return null;
     }
 
