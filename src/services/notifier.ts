@@ -19,6 +19,7 @@
 import { logger } from '../utils/logger.js';
 import { DISCORD_THRESHOLD } from '../engine/convictionScorer.js';
 import type { Signal } from '../types.js';
+import type { PaperTrade } from '../trader/paperTrader.js';
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1_000;
@@ -265,6 +266,64 @@ export class Notifier {
       logger.info('NOTIFY', `✅ Discord embed sent (${signal.symbol} — ${signal.convictionScore}/10)`);
     } else {
       logger.error('NOTIFY', '❌ Failed to send Discord message after all retries');
+    }
+  }
+
+  /** Send a paper trade alert to Discord */
+  async sendTradeAlert(trade: PaperTrade, action: 'OPEN' | 'CLOSE'): Promise<void> {
+    if (!this.discordWebhookUrl) return;
+
+    const isOpen = action === 'OPEN';
+    const isBullish = trade.direction === 'BULLISH';
+    const color = isOpen
+      ? (isBullish ? 0x00ff88 : 0xff4444)
+      : (trade.status === 'WIN' ? 0x00ff88 : trade.status === 'BREAKEVEN' ? 0xffaa00 : 0xff4444);
+
+    const statusEmoji = isOpen ? '📝' : (trade.status === 'WIN' ? '✅' : trade.status === 'BREAKEVEN' ? '🔄' : '❌');
+    const dirEmoji = isBullish ? '📈' : '📉';
+    const title = isOpen
+      ? `${statusEmoji} PAPER TRADE OPENED | ${dirEmoji} ${trade.direction}`
+      : `${statusEmoji} PAPER TRADE ${trade.status} | ${dirEmoji} ${trade.direction}`;
+
+    const fields: { name: string; value: string; inline: boolean }[] = [
+      { name: '🪙 Symbol', value: `**${trade.symbol}**`, inline: true },
+      { name: '🎯 Pattern', value: trade.pattern, inline: true },
+      { name: '📊 Conviction', value: `${trade.convictionScore}/10`, inline: true },
+      { name: '💰 Entry', value: `$${trade.entryPrice}`, inline: true },
+      { name: '🛑 Stop Loss', value: `$${trade.stopLoss.toFixed(4)}`, inline: true },
+      { name: '🎯 Take Profit', value: `$${trade.takeProfit.toFixed(4)}`, inline: true },
+      { name: '💵 Position Size', value: `$${trade.positionSizeUsd.toFixed(0)}`, inline: true },
+    ];
+
+    if (!isOpen && trade.exitPrice !== null) {
+      fields.push(
+        { name: '🚪 Exit Price', value: `$${trade.exitPrice.toFixed(4)}`, inline: true },
+        { name: '📈 P&L', value: `${trade.pnlPct!.toFixed(2)}% ($${trade.pnlUsd!.toFixed(2)})`, inline: true },
+        { name: '⏱️ Duration', value: `${((trade.exitTime! - trade.entryTime) / 60_000).toFixed(0)} min`, inline: true },
+      );
+    }
+
+    const embed = {
+      embeds: [{
+        title,
+        color,
+        fields,
+        footer: { text: '🤖 Paper Trading Mode — No Real Money' },
+        timestamp: new Date().toISOString(),
+      }],
+      username: 'Before Move 🤖',
+    };
+
+    const response = await fetchWithRetry(this.discordWebhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(embed),
+    });
+
+    if (response) {
+      logger.info('NOTIFY', `✅ Discord trade alert sent (${trade.symbol} ${action})`);
+    } else {
+      logger.error('NOTIFY', `❌ Failed to send trade alert to Discord`);
     }
   }
 

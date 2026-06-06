@@ -16,6 +16,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from '../utils/logger.js';
 import type { Signal, VolumeBucket } from '../types.js';
+import type { PaperTrade } from '../trader/paperTrader.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.resolve(__dirname, '../../data/before_move.db');
@@ -121,10 +122,34 @@ export class Storage {
       )
     `);
 
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS paper_trades (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        entry_price REAL NOT NULL,
+        stop_loss REAL NOT NULL,
+        take_profit REAL NOT NULL,
+        position_size_usd REAL NOT NULL,
+        entry_time INTEGER NOT NULL,
+        exit_price REAL,
+        exit_time INTEGER,
+        pnl_pct REAL,
+        pnl_usd REAL,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        trigger_signal_id TEXT,
+        conviction_score INTEGER,
+        pattern TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_buckets_symbol_time ON volume_buckets(symbol, open_time)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_oi_symbol_time ON oi_snapshots(symbol, timestamp)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_paper_trades_symbol ON paper_trades(symbol)`);
   }
 
   /** Persist a signal */
@@ -212,6 +237,108 @@ export class Storage {
     this.db.run('DELETE FROM volume_buckets WHERE open_time < ?', [cutoff]);
     this.db.run('DELETE FROM oi_snapshots WHERE timestamp < ?', [cutoff]);
     logger.info('DB', `Cleanup complete for data older than ${daysToKeep} days`);
+  }
+
+  // ===== PAPER TRADE METHODS =====
+
+  /** Persist a new paper trade */
+  savePaperTrade(trade: PaperTrade): void {
+    this.db.run(
+      `INSERT OR IGNORE INTO paper_trades
+        (id, symbol, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, status, trigger_signal_id, conviction_score, pattern)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        trade.id,
+        trade.symbol,
+        trade.direction,
+        trade.entryPrice,
+        trade.stopLoss,
+        trade.takeProfit,
+        trade.positionSizeUsd,
+        trade.entryTime,
+        trade.status,
+        trade.triggerSignalId,
+        trade.convictionScore,
+        trade.pattern,
+      ]
+    );
+  }
+
+  /** Update a paper trade when it closes */
+  updatePaperTrade(
+    id: string,
+    exitPrice: number,
+    exitTime: number,
+    pnlPct: number,
+    pnlUsd: number,
+    status: string
+  ): void {
+    this.db.run(
+      `UPDATE paper_trades SET exit_price = ?, exit_time = ?, pnl_pct = ?, pnl_usd = ?, status = ? WHERE id = ?`,
+      [exitPrice, exitTime, pnlPct, pnlUsd, status, id]
+    );
+  }
+
+  /** Get all open paper trades */
+  getOpenPaperTrades(): PaperTrade[] {
+    const results = this.db.exec(
+      `SELECT id, symbol, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, trigger_signal_id, conviction_score, pattern
+       FROM paper_trades WHERE status = 'OPEN'`
+    );
+
+    if (results.length === 0) return [];
+
+    return results[0].values.map((row: unknown[]) => ({
+      id: row[0] as string,
+      symbol: row[1] as string,
+      direction: row[2] as PaperTrade['direction'],
+      entryPrice: row[3] as number,
+      stopLoss: row[4] as number,
+      originalStopLoss: row[4] as number,
+      takeProfit: row[5] as number,
+      positionSizeUsd: row[6] as number,
+      entryTime: row[7] as number,
+      exitPrice: null,
+      exitTime: null,
+      pnlPct: null,
+      pnlUsd: null,
+      status: 'OPEN' as const,
+      triggerSignalId: row[8] as string,
+      convictionScore: row[9] as number,
+      pattern: row[10] as string,
+      trailingActivated: false,
+    }));
+  }
+
+  /** Get recent closed paper trades */
+  getPaperTradeHistory(limit: number = 50): PaperTrade[] {
+    const results = this.db.exec(
+      `SELECT id, symbol, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, exit_price, exit_time, pnl_pct, pnl_usd, status, trigger_signal_id, conviction_score, pattern
+       FROM paper_trades WHERE status != 'OPEN' ORDER BY exit_time DESC LIMIT ${limit}`
+    );
+
+    if (results.length === 0) return [];
+
+    return results[0].values.map((row: unknown[]) => ({
+      id: row[0] as string,
+      symbol: row[1] as string,
+      direction: row[2] as PaperTrade['direction'],
+      entryPrice: row[3] as number,
+      stopLoss: row[4] as number,
+      originalStopLoss: row[4] as number,
+      takeProfit: row[5] as number,
+      positionSizeUsd: row[6] as number,
+      entryTime: row[7] as number,
+      exitPrice: row[8] as number | null,
+      exitTime: row[9] as number | null,
+      pnlPct: row[10] as number | null,
+      pnlUsd: row[11] as number | null,
+      status: row[12] as PaperTrade['status'],
+      triggerSignalId: row[13] as string,
+      convictionScore: row[14] as number,
+      pattern: row[15] as string,
+      trailingActivated: false,
+    }));
   }
 
   /** Close the database and save to disk */

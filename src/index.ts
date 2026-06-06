@@ -19,6 +19,7 @@ import { StateAggregator } from './engine/state.js';
 import { AnomalyDetector } from './engine/strategies.js';
 import { Notifier } from './services/notifier.js';
 import { Storage } from './db/storage.js';
+import { TradingAgent } from './trader/index.js';
 import { logger } from './utils/logger.js';
 
 // ===== STARTUP BANNER =====
@@ -141,10 +142,19 @@ async function main(): Promise<void> {
   // 4. Storage
   const storage = await Storage.create();
 
-  // 5. Wire signals
+  // 5. Trading Agent (Paper Trading — EMA Pullback Strategy)
+  const trader = new TradingAgent(storage);
+
+  // Wire trade events to Discord notifications
+  trader.onTrade(async (trade, action) => {
+    await notifier.sendTradeAlert(trade, action);
+  });
+
+  // 6. Wire signals
   detector.onSignal(async (signal) => {
     storage.saveSignal(signal);
     await notifier.send(signal);
+    trader.onSignal(signal); // Feed to trading agent watchlist
   });
 
   // --- Phase 3: Connect to Exchanges ---
@@ -237,7 +247,7 @@ async function main(): Promise<void> {
     logger.warn('INIT', 'Binance unavailable — running on Bybit data only');
   }
 
-  // --- Phase 4: Start Evaluation & Reporting ---
+  // --- Phase 4: Start Evaluation, Reporting & Trading ---
 
   const evalInterval = setInterval(() => {
     detector.evaluate();
@@ -246,6 +256,9 @@ async function main(): Promise<void> {
   const statusInterval = setInterval(() => {
     printStatus(aggregator);
   }, 30_000);
+
+  // Start the paper trading agent
+  trader.start();
 
   // Refresh historical baselines every 4 hours so macro OI/price calculations stay accurate
   const historyRefreshInterval = setInterval(async () => {
@@ -260,6 +273,7 @@ async function main(): Promise<void> {
     clearInterval(evalInterval);
     clearInterval(statusInterval);
     clearInterval(historyRefreshInterval);
+    trader.stop();
     bybitWs.shutdown();
     storage.close();
     logger.info('MAIN', '✅ Shutdown complete. Goodbye.');
@@ -271,6 +285,7 @@ async function main(): Promise<void> {
 
   logger.info('INIT', '✅ All systems online.');
   logger.info('INIT', `Tracking ${discovery.symbols.length} coins across Bybit + Binance`);
+  logger.info('INIT', '🤖 Paper Trading Agent active — waiting for high-conviction breakouts');
   logger.info('INIT', 'Press Ctrl+C to shut down.');
 }
 
