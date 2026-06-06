@@ -1,9 +1,10 @@
 // ============================================================
 // before-move: EMA Calculator
 //
-// Fetches 15-minute klines from Bybit REST API and calculates
-// the 9 EMA and 15 EMA. Returns the current EMA values and
-// the last few closed candles for pattern detection.
+// Fetches klines from Bybit REST API for multiple timeframes
+// (3m, 5m, 15m) and calculates the 9 EMA and 15 EMA.
+// Returns the current EMA values and the last few closed
+// candles for pattern detection.
 //
 // EMA Formula: EMA = price × k + previousEMA × (1 - k)
 // where k = 2 / (period + 1)
@@ -22,8 +23,21 @@ export interface Kline {
   volume: number;
 }
 
+/** Supported timeframes for the EMA pullback strategy */
+export type Timeframe = '3' | '5' | '15';
+
+export const ALL_TIMEFRAMES: Timeframe[] = ['3', '5', '15'];
+
+/** Human-readable labels for timeframes */
+export const TIMEFRAME_LABELS: Record<Timeframe, string> = {
+  '3': '3m',
+  '5': '5m',
+  '15': '15m',
+};
+
 export interface EMAResult {
   symbol: string;
+  timeframe: Timeframe;
   ema9: number;
   ema15: number;
   /** Last 5 closed candles (newest last) for pattern detection */
@@ -63,18 +77,18 @@ function calculateEMA(closes: number[], period: number): number {
 }
 
 /**
- * Fetch 15-minute klines from Bybit and calculate 9/15 EMA.
+ * Fetch klines from Bybit for a given timeframe and calculate 9/15 EMA.
  * Returns null if the API call fails.
  */
-export async function getEMAData(symbol: string): Promise<EMAResult | null> {
+export async function getEMAData(symbol: string, interval: Timeframe = '15'): Promise<EMAResult | null> {
   try {
     // Fetch 100 candles — enough for accurate EMA calculation
-    const url = `${BYBIT_REST}/v5/market/kline?category=linear&symbol=${symbol}&interval=15&limit=100`;
+    const url = `${BYBIT_REST}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=100`;
     const res = await fetch(url);
     const data = await res.json() as any;
 
     if (!data?.result?.list || data.result.list.length === 0) {
-      logger.warn('EMA', `No kline data for ${symbol}`);
+      logger.warn('EMA', `No kline data for ${symbol} (${interval}m)`);
       return null;
     }
 
@@ -91,7 +105,7 @@ export async function getEMAData(symbol: string): Promise<EMAResult | null> {
     }));
 
     if (klines.length < 15) {
-      logger.warn('EMA', `Not enough klines for ${symbol} (${klines.length} < 15)`);
+      logger.warn('EMA', `Not enough klines for ${symbol} ${interval}m (${klines.length} < 15)`);
       return null;
     }
 
@@ -109,6 +123,7 @@ export async function getEMAData(symbol: string): Promise<EMAResult | null> {
 
     return {
       symbol,
+      timeframe: interval,
       ema9,
       ema15,
       candles: recentCandles,
@@ -116,30 +131,30 @@ export async function getEMAData(symbol: string): Promise<EMAResult | null> {
       timestamp: Date.now(),
     };
   } catch (err) {
-    logger.error('EMA', `Failed to fetch klines for ${symbol}`, { error: String(err) });
+    logger.error('EMA', `Failed to fetch klines for ${symbol} (${interval}m)`, { error: String(err) });
     return null;
   }
 }
 
 /**
- * Calculate the EMA values for multiple symbols in parallel.
+ * Calculate the EMA values for multiple symbols in parallel for a specific timeframe.
  * Processes in chunks to respect rate limits.
  */
-export async function getEMADataBatch(symbols: string[]): Promise<Map<string, EMAResult>> {
+export async function getEMADataBatch(symbols: string[], interval: Timeframe = '15'): Promise<Map<string, EMAResult>> {
   const results = new Map<string, EMAResult>();
   const chunkSize = 5;
 
   for (let i = 0; i < symbols.length; i += chunkSize) {
     const chunk = symbols.slice(i, i + chunkSize);
     const promises = chunk.map(async (symbol) => {
-      const result = await getEMAData(symbol);
+      const result = await getEMAData(symbol, interval);
       if (result) {
         results.set(symbol, result);
       }
     });
     await Promise.all(promises);
 
-    // Slight pause between chunks
+    // Slight pause between chunks to respect rate limits
     if (i + chunkSize < symbols.length) {
       await new Promise(r => setTimeout(r, 200));
     }

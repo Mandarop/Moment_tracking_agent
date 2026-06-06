@@ -14,11 +14,12 @@
 // ============================================================
 
 import { logger } from '../utils/logger.js';
-import type { Kline, EMAResult } from './emaCalculator.js';
+import type { Kline, EMAResult, Timeframe } from './emaCalculator.js';
 import type { SignalDirection } from '../types.js';
 
 export interface PullbackSignal {
   symbol: string;
+  timeframe: Timeframe;
   direction: SignalDirection;
   pattern: 'HAMMER' | 'ENGULFING' | 'REJECTION';
   /** The confirmation candle that triggered the entry */
@@ -222,6 +223,7 @@ export function detectPullback(emaData: EMAResult, direction: SignalDirection): 
 
   return {
     symbol,
+    timeframe: emaData.timeframe,
     direction,
     pattern,
     confirmationCandle: confirmCandle,

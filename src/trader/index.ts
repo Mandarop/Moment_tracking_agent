@@ -13,7 +13,7 @@
 
 import { logger } from '../utils/logger.js';
 import { WatchlistManager } from './watchlist.js';
-import { getEMADataBatch } from './emaCalculator.js';
+import { getEMADataBatch, ALL_TIMEFRAMES } from './emaCalculator.js';
 import { detectPullback } from './pullbackDetector.js';
 import { PaperTrader } from './paperTrader.js';
 import type { PaperTrade } from './paperTrader.js';
@@ -40,7 +40,7 @@ export class TradingAgent {
     this.storage = storage;
 
     logger.info('TRADER', '🤖 Paper Trading Agent initialized');
-    logger.info('TRADER', '   Strategy: EMA Pullback (9/15 EMA on 15m chart)');
+    logger.info('TRADER', '   Strategy: EMA Pullback (9/15 EMA on 3m, 5m, and 15m charts)');
     logger.info('TRADER', '   Balance: $10,000 | Risk: 2% per trade | R:R 1:2');
     logger.info('TRADER', '   Mode: PAPER TRADING (no real money)');
   }
@@ -102,80 +102,110 @@ export class TradingAgent {
     this.watchlist.pruneExpired();
 
     const entries = this.watchlist.getAll();
-    if (entries.length === 0 && this.paperTrader.openCount === 0) {
+    const openPositions = this.paperTrader.getOpenPositions();
+
+    if (entries.length === 0 && openPositions.length === 0) {
       return; // Nothing to do
     }
 
-    // 2. Fetch EMA data for all watchlisted symbols + open positions
-    const symbolsToCheck = new Set<string>();
-    for (const entry of entries) {
-      symbolsToCheck.add(entry.symbol);
-    }
-    for (const pos of this.paperTrader.getOpenPositions()) {
-      symbolsToCheck.add(pos.symbol);
-    }
+    // Map to accumulate the latest prices of symbols (across checked timeframes) for checking positions
+    const currentPrices = new Map<string, number>();
 
-    if (symbolsToCheck.size === 0) return;
+    // 2. Process each timeframe independently
+    for (const timeframe of ALL_TIMEFRAMES) {
+      const symbolsToCheck = new Set<string>();
 
-    const emaResults = await getEMADataBatch(Array.from(symbolsToCheck));
-
-    // 3. Check for pullback setups on watchlisted coins
-    for (const entry of entries) {
-      // Skip if we already have a position on this coin
-      if (this.paperTrader.hasPosition(entry.symbol)) continue;
-
-      const emaData = emaResults.get(entry.symbol);
-      if (!emaData) continue;
-
-      const pullback = detectPullback(emaData, entry.direction);
-      if (!pullback) continue;
-
-      // 🎯 Pullback detected! Open a paper trade
-      const trade = this.paperTrader.openTrade(
-        pullback,
-        entry.signalId,
-        entry.convictionScore
-      );
-
-      if (trade) {
-        // Save to SQLite
-        this.storage.savePaperTrade(trade);
-
-        // Remove from watchlist (we've entered the trade)
-        this.watchlist.remove(entry.symbol, entry.direction);
-
-        // Notify
-        if (this.onTradeCallback) {
-          this.onTradeCallback(trade, 'OPEN');
+      // Watchlisted symbols that haven't triggered a trade on this timeframe yet
+      for (const entry of entries) {
+        const triggered = entry.triggeredTimeframes || [];
+        if (!triggered.includes(timeframe) && !this.paperTrader.hasPosition(entry.symbol, timeframe)) {
+          symbolsToCheck.add(entry.symbol);
         }
       }
-    }
 
-    // 4. Check open positions against current prices (SL/TP management)
-    const currentPrices = new Map<string, number>();
-    for (const [symbol, emaData] of emaResults) {
-      if (emaData.currentCandle) {
-        currentPrices.set(symbol, emaData.currentCandle.close);
-      } else if (emaData.candles.length > 0) {
-        currentPrices.set(symbol, emaData.candles[emaData.candles.length - 1].close);
+      // Symbols with active positions on this timeframe
+      for (const pos of openPositions) {
+        if (pos.timeframe === timeframe) {
+          symbolsToCheck.add(pos.symbol);
+        }
       }
+
+      if (symbolsToCheck.size === 0) continue;
+
+      logger.debug('TRADER', `Fetching klines & EMAs for ${symbolsToCheck.size} symbols on ${timeframe}m chart...`);
+      const emaResults = await getEMADataBatch(Array.from(symbolsToCheck), timeframe);
+
+      // Check setups for watchlisted coins
+      for (const entry of entries) {
+        const triggered = entry.triggeredTimeframes || [];
+        if (triggered.includes(timeframe)) continue;
+        if (this.paperTrader.hasPosition(entry.symbol, timeframe)) continue;
+
+        const emaData = emaResults.get(entry.symbol);
+        if (!emaData) continue;
+
+        const pullback = detectPullback(emaData, entry.direction);
+        if (!pullback) continue;
+
+        // 🎯 Pullback detected on this timeframe! Open a paper trade
+        const trade = this.paperTrader.openTrade(
+          pullback,
+          entry.signalId,
+          entry.convictionScore
+        );
+
+        if (trade) {
+          // Save to SQLite
+          this.storage.savePaperTrade(trade);
+
+          // Mark as triggered for this watchlist entry
+          entry.triggeredTimeframes = triggered;
+          entry.triggeredTimeframes.push(timeframe);
+
+          // If triggered on all 3 timeframes, remove from watchlist
+          if (entry.triggeredTimeframes.length === ALL_TIMEFRAMES.length) {
+            this.watchlist.remove(entry.symbol, entry.direction);
+            logger.info('WATCHLIST', `🔥 Removed ${entry.symbol} ${entry.direction} — triggered on all timeframes (3m, 5m, 15m)`);
+          }
+
+          // Notify
+          if (this.onTradeCallback) {
+            this.onTradeCallback(trade, 'OPEN');
+          }
+        }
+      }
+
+      // Track the latest price of each symbol from this timeframe's data
+      for (const [symbol, emaData] of emaResults) {
+        if (emaData.currentCandle) {
+          currentPrices.set(symbol, emaData.currentCandle.close);
+        } else if (emaData.candles.length > 0) {
+          currentPrices.set(symbol, emaData.candles[emaData.candles.length - 1].close);
+        }
+      }
+
+      // Pause briefly to respect rate limits
+      await new Promise(r => setTimeout(r, 300));
     }
 
-    const closedTrades = this.paperTrader.checkPositions(currentPrices);
+    // 3. Manage open positions using latest prices
+    if (currentPrices.size > 0) {
+      const closedTrades = this.paperTrader.checkPositions(currentPrices);
 
-    // Save and notify closed trades
-    for (const trade of closedTrades) {
-      this.storage.updatePaperTrade(
-        trade.id,
-        trade.exitPrice!,
-        trade.exitTime!,
-        trade.pnlPct!,
-        trade.pnlUsd!,
-        trade.status
-      );
+      // Save and notify closed trades
+      for (const trade of closedTrades) {
+        this.storage.updatePaperTrade(
+          trade.id,
+          trade.exitPrice!,
+          trade.exitTime!,
+          trade.pnlPct!,
+          trade.pnlUsd!,
+          trade.status
+        );
 
-      if (this.onTradeCallback) {
-        this.onTradeCallback(trade, 'CLOSE');
+        if (this.onTradeCallback) {
+          this.onTradeCallback(trade, 'CLOSE');
+        }
       }
     }
   }
@@ -186,6 +216,7 @@ export class TradingAgent {
   private printStatus(): void {
     const watchlistEntries = this.watchlist.getAll();
     const openPositions = this.paperTrader.getOpenPositions();
+    const closedTrades = this.paperTrader.getClosedTrades();
     const stats = this.paperTrader.getStats();
 
     if (watchlistEntries.length === 0 && openPositions.length === 0 && stats.totalTrades === 0) {
@@ -193,7 +224,7 @@ export class TradingAgent {
     }
 
     console.log('\n\x1b[90m' + '─'.repeat(60) + '\x1b[0m');
-    logger.info('TRADER', '🤖 PAPER TRADING STATUS');
+    logger.info('TRADER', '🤖 PAPER TRADING STATUS REPORT');
     console.log('\x1b[90m' + '─'.repeat(60) + '\x1b[0m');
 
     // Watchlist
@@ -201,7 +232,10 @@ export class TradingAgent {
       logger.info('TRADER', `📋 Watchlist (${watchlistEntries.length} coins):`);
       for (const entry of watchlistEntries) {
         const ttl = Math.round((entry.expiresAt - Date.now()) / 3600_000);
-        logger.info('TRADER', `   ${entry.symbol} ${entry.direction} — conviction: ${entry.convictionScore}/10, TTL: ${ttl}h`);
+        const triggeredStr = entry.triggeredTimeframes && entry.triggeredTimeframes.length > 0
+          ? ` (Triggered: ${entry.triggeredTimeframes.map(tf => tf + 'm').join(', ')})`
+          : '';
+        logger.info('TRADER', `   ${entry.symbol} ${entry.direction} — conviction: ${entry.convictionScore}/10, TTL: ${ttl}h${triggeredStr}`);
       }
     }
 
@@ -211,14 +245,31 @@ export class TradingAgent {
       for (const pos of openPositions) {
         const duration = Math.round((Date.now() - pos.entryTime) / 60_000);
         const trailing = pos.trailingActivated ? ' [TRAILING]' : '';
-        logger.info('TRADER', `   ${pos.symbol} ${pos.direction} @ $${pos.entryPrice} — SL: $${pos.stopLoss.toFixed(4)} TP: $${pos.takeProfit.toFixed(4)} (${duration}m)${trailing}`);
+        logger.info('TRADER', `   ${pos.symbol} (${pos.timeframe}m) ${pos.direction} @ $${pos.entryPrice} — SL: $${pos.stopLoss.toFixed(4)} TP: $${pos.takeProfit.toFixed(4)} (${duration}m)${trailing}`);
       }
     }
 
-    // Stats
+    // Performance per timeframe
     if (stats.totalTrades > 0) {
-      const pnlColor = stats.totalPnlUsd >= 0 ? '\x1b[32m' : '\x1b[31m';
-      logger.info('TRADER', `📈 Performance: ${stats.wins}W / ${stats.losses}L / ${stats.breakevens}BE | WR: ${stats.winRate.toFixed(0)}% | P&L: ${pnlColor}$${stats.totalPnlUsd.toFixed(2)}\x1b[0m`);
+      logger.info('TRADER', `📈 Performance Breakdown:`);
+      
+      const timeframes: ('3' | '5' | '15')[] = ['3', '5', '15'];
+      for (const tf of timeframes) {
+        const tfTrades = closedTrades.filter(t => t.timeframe === tf);
+        if (tfTrades.length === 0) continue;
+
+        const wins = tfTrades.filter(t => t.status === 'WIN').length;
+        const losses = tfTrades.filter(t => t.status === 'LOSS').length;
+        const breakevens = tfTrades.filter(t => t.status === 'BREAKEVEN').length;
+        const totalPnlUsd = tfTrades.reduce((sum, t) => sum + (t.pnlUsd || 0), 0);
+        const winRate = (wins / tfTrades.length) * 100;
+        const pnlColor = totalPnlUsd >= 0 ? '\x1b[32m' : '\x1b[31m';
+
+        logger.info('TRADER', `   [${tf}m Chart]: ${wins}W / ${losses}L / ${breakevens}BE | WR: ${winRate.toFixed(0)}% | P&L: ${pnlColor}$${totalPnlUsd.toFixed(2)}\x1b[0m`);
+      }
+
+      const globalPnlColor = stats.totalPnlUsd >= 0 ? '\x1b[32m' : '\x1b[31m';
+      logger.info('TRADER', `   [GLOBAL TOTAL]: ${stats.wins}W / ${stats.losses}L / ${stats.breakevens}BE | WR: ${stats.winRate.toFixed(0)}% | P&L: ${globalPnlColor}$${stats.totalPnlUsd.toFixed(2)}\x1b[0m`);
     }
 
     console.log('\x1b[90m' + '─'.repeat(60) + '\x1b[0m\n');

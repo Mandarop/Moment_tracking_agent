@@ -23,6 +23,7 @@ export interface WatchlistEntry {
   signalId: string;
   addedAt: number;
   expiresAt: number;
+  triggeredTimeframes?: string[];
 }
 
 /** How long a coin stays on the watchlist before being removed (24 hours) */
@@ -56,6 +57,7 @@ export class WatchlistManager {
       existing.expiresAt = now + WATCHLIST_TTL_MS;
       existing.breakoutPrice = signal.price;
       existing.convictionScore = signal.convictionScore;
+      existing.triggeredTimeframes = []; // reset triggered timeframes on signal update
       logger.info('WATCHLIST', `🔄 Updated ${signal.symbol} ${signal.direction} on watchlist (conviction: ${signal.convictionScore}/10)`);
       return existing;
     }
@@ -68,6 +70,7 @@ export class WatchlistManager {
       signalId: signal.id,
       addedAt: now,
       expiresAt: now + WATCHLIST_TTL_MS,
+      triggeredTimeframes: [],
     };
 
     this.watchlist.set(key, entry);

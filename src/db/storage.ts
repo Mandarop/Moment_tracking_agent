@@ -17,6 +17,7 @@ import { fileURLToPath } from 'url';
 import { logger } from '../utils/logger.js';
 import type { Signal, VolumeBucket } from '../types.js';
 import type { PaperTrade } from '../trader/paperTrader.js';
+import type { Timeframe } from '../trader/emaCalculator.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.resolve(__dirname, '../../data/before_move.db');
@@ -126,6 +127,7 @@ export class Storage {
       CREATE TABLE IF NOT EXISTS paper_trades (
         id TEXT PRIMARY KEY,
         symbol TEXT NOT NULL,
+        timeframe TEXT NOT NULL DEFAULT '15',
         direction TEXT NOT NULL,
         entry_price REAL NOT NULL,
         stop_loss REAL NOT NULL,
@@ -143,6 +145,14 @@ export class Storage {
         created_at TEXT DEFAULT (datetime('now'))
       )
     `);
+
+    // Alter table to add timeframe if it doesn't exist (migration for existing database)
+    try {
+      this.db.run(`ALTER TABLE paper_trades ADD COLUMN timeframe TEXT NOT NULL DEFAULT '15'`);
+      logger.info('DB', 'Migrated paper_trades table: added timeframe column');
+    } catch (err) {
+      // Column probably already exists, which is fine
+    }
 
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)`);
@@ -245,11 +255,12 @@ export class Storage {
   savePaperTrade(trade: PaperTrade): void {
     this.db.run(
       `INSERT OR IGNORE INTO paper_trades
-        (id, symbol, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, status, trigger_signal_id, conviction_score, pattern)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, symbol, timeframe, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, status, trigger_signal_id, conviction_score, pattern)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         trade.id,
         trade.symbol,
+        trade.timeframe,
         trade.direction,
         trade.entryPrice,
         trade.stopLoss,
@@ -282,7 +293,7 @@ export class Storage {
   /** Get all open paper trades */
   getOpenPaperTrades(): PaperTrade[] {
     const results = this.db.exec(
-      `SELECT id, symbol, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, trigger_signal_id, conviction_score, pattern
+      `SELECT id, symbol, timeframe, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, trigger_signal_id, conviction_score, pattern
        FROM paper_trades WHERE status = 'OPEN'`
     );
 
@@ -291,21 +302,22 @@ export class Storage {
     return results[0].values.map((row: unknown[]) => ({
       id: row[0] as string,
       symbol: row[1] as string,
-      direction: row[2] as PaperTrade['direction'],
-      entryPrice: row[3] as number,
-      stopLoss: row[4] as number,
-      originalStopLoss: row[4] as number,
-      takeProfit: row[5] as number,
-      positionSizeUsd: row[6] as number,
-      entryTime: row[7] as number,
+      timeframe: row[2] as Timeframe,
+      direction: row[3] as PaperTrade['direction'],
+      entryPrice: row[4] as number,
+      stopLoss: row[5] as number,
+      originalStopLoss: row[5] as number,
+      takeProfit: row[6] as number,
+      positionSizeUsd: row[7] as number,
+      entryTime: row[8] as number,
       exitPrice: null,
       exitTime: null,
       pnlPct: null,
       pnlUsd: null,
       status: 'OPEN' as const,
-      triggerSignalId: row[8] as string,
-      convictionScore: row[9] as number,
-      pattern: row[10] as string,
+      triggerSignalId: row[9] as string,
+      convictionScore: row[10] as number,
+      pattern: row[11] as string,
       trailingActivated: false,
     }));
   }
@@ -313,7 +325,7 @@ export class Storage {
   /** Get recent closed paper trades */
   getPaperTradeHistory(limit: number = 50): PaperTrade[] {
     const results = this.db.exec(
-      `SELECT id, symbol, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, exit_price, exit_time, pnl_pct, pnl_usd, status, trigger_signal_id, conviction_score, pattern
+      `SELECT id, symbol, timeframe, direction, entry_price, stop_loss, take_profit, position_size_usd, entry_time, exit_price, exit_time, pnl_pct, pnl_usd, status, trigger_signal_id, conviction_score, pattern
        FROM paper_trades WHERE status != 'OPEN' ORDER BY exit_time DESC LIMIT ${limit}`
     );
 
@@ -322,21 +334,22 @@ export class Storage {
     return results[0].values.map((row: unknown[]) => ({
       id: row[0] as string,
       symbol: row[1] as string,
-      direction: row[2] as PaperTrade['direction'],
-      entryPrice: row[3] as number,
-      stopLoss: row[4] as number,
-      originalStopLoss: row[4] as number,
-      takeProfit: row[5] as number,
-      positionSizeUsd: row[6] as number,
-      entryTime: row[7] as number,
-      exitPrice: row[8] as number | null,
-      exitTime: row[9] as number | null,
-      pnlPct: row[10] as number | null,
-      pnlUsd: row[11] as number | null,
-      status: row[12] as PaperTrade['status'],
-      triggerSignalId: row[13] as string,
-      convictionScore: row[14] as number,
-      pattern: row[15] as string,
+      timeframe: row[2] as Timeframe,
+      direction: row[3] as PaperTrade['direction'],
+      entryPrice: row[4] as number,
+      stopLoss: row[5] as number,
+      originalStopLoss: row[5] as number,
+      takeProfit: row[6] as number,
+      positionSizeUsd: row[7] as number,
+      entryTime: row[8] as number,
+      exitPrice: row[9] as number | null,
+      exitTime: row[10] as number | null,
+      pnlPct: row[11] as number | null,
+      pnlUsd: row[12] as number | null,
+      status: row[13] as PaperTrade['status'],
+      triggerSignalId: row[14] as string,
+      convictionScore: row[15] as number,
+      pattern: row[16] as string,
       trailingActivated: false,
     }));
   }

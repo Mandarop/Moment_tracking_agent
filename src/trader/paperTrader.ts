@@ -12,6 +12,7 @@
 import { logger } from '../utils/logger.js';
 import type { SignalDirection } from '../types.js';
 import type { PullbackSignal } from './pullbackDetector.js';
+import type { Timeframe } from './emaCalculator.js';
 
 /** Paper trading configuration */
 const PAPER_BALANCE = 10_000;   // $10,000 simulated balance
@@ -23,6 +24,7 @@ const MAX_OPEN_POSITIONS = 5;   // Don't overexpose
 export interface PaperTrade {
   id: string;
   symbol: string;
+  timeframe: Timeframe;
   direction: SignalDirection;
   entryPrice: number;
   stopLoss: number;
@@ -44,8 +46,8 @@ export interface PaperTrade {
 /**
  * Generate a unique trade ID.
  */
-function generateTradeId(symbol: string): string {
-  return `PAPER:${symbol}:${Date.now()}`;
+function generateTradeId(symbol: string, timeframe: Timeframe): string {
+  return `PAPER:${symbol}:${timeframe}:${Date.now()}`;
 }
 
 export class PaperTrader {
@@ -63,17 +65,19 @@ export class PaperTrader {
   ): PaperTrade | null {
     // Block if max open positions reached
     if (this.openPositions.size >= MAX_OPEN_POSITIONS) {
-      logger.warn('PAPER', `⛔ Max open positions (${MAX_OPEN_POSITIONS}) reached. Skipping ${pullback.symbol}.`);
+      logger.warn('PAPER', `⛔ Max open positions (${MAX_OPEN_POSITIONS}) reached. Skipping ${pullback.symbol} (${pullback.timeframe}m).`);
       return null;
     }
 
-    // Block if already have a position on this symbol
-    if (this.openPositions.has(pullback.symbol)) {
-      logger.warn('PAPER', `⛔ Already have an open position on ${pullback.symbol}. Skipping.`);
+    const key = `${pullback.symbol}:${pullback.timeframe}`;
+
+    // Block if already have a position on this symbol and timeframe
+    if (this.openPositions.has(key)) {
+      logger.warn('PAPER', `⛔ Already have an open position on ${pullback.symbol} (${pullback.timeframe}m). Skipping.`);
       return null;
     }
 
-    const { entryPrice, stopLoss, direction, symbol, pattern } = pullback;
+    const { entryPrice, stopLoss, direction, symbol, pattern, timeframe } = pullback;
 
     // Calculate position size based on risk
     const riskAmount = PAPER_BALANCE * (RISK_PER_TRADE_PCT / 100); // $200
@@ -96,8 +100,9 @@ export class PaperTrader {
     }
 
     const trade: PaperTrade = {
-      id: generateTradeId(symbol),
+      id: generateTradeId(symbol, timeframe),
       symbol,
+      timeframe,
       direction,
       entryPrice,
       stopLoss,
@@ -116,9 +121,9 @@ export class PaperTrader {
       trailingActivated: false,
     };
 
-    this.openPositions.set(symbol, trade);
+    this.openPositions.set(key, trade);
 
-    logger.signal('PAPER', `📝 PAPER TRADE OPENED: ${direction} ${symbol}`, {
+    logger.signal('PAPER', `📝 PAPER TRADE OPENED: ${direction} ${symbol} (${timeframe}m)`, {
       entry: `$${entryPrice}`,
       stopLoss: `$${stopLoss.toFixed(4)}`,
       takeProfit: `$${takeProfit.toFixed(4)}`,
@@ -141,8 +146,8 @@ export class PaperTrader {
   checkPositions(currentPrices: Map<string, number>): PaperTrade[] {
     const closedThisTick: PaperTrade[] = [];
 
-    for (const [symbol, trade] of this.openPositions) {
-      const price = currentPrices.get(symbol);
+    for (const [, trade] of this.openPositions) {
+      const price = currentPrices.get(trade.symbol);
       if (!price) continue;
 
       // Check for trailing stop activation
@@ -155,7 +160,7 @@ export class PaperTrader {
           // Move SL to breakeven
           trade.stopLoss = trade.entryPrice;
           trade.trailingActivated = true;
-          logger.info('PAPER', `🔒 Trailing stop activated for ${symbol} — SL moved to breakeven ($${trade.entryPrice})`);
+          logger.info('PAPER', `🔒 Trailing stop activated for ${trade.symbol} (${trade.timeframe}m) — SL moved to breakeven ($${trade.entryPrice})`);
         }
       }
 
@@ -208,11 +213,11 @@ export class PaperTrader {
     }
 
     // Remove from open, add to closed
-    this.openPositions.delete(trade.symbol);
+    this.openPositions.delete(`${trade.symbol}:${trade.timeframe}`);
     this.closedTrades.push(trade);
 
     const emoji = trade.status === 'WIN' ? '✅' : trade.status === 'BREAKEVEN' ? '🔄' : '❌';
-    logger.signal('PAPER', `${emoji} PAPER TRADE CLOSED: ${trade.status} on ${trade.symbol}`, {
+    logger.signal('PAPER', `${emoji} PAPER TRADE CLOSED: ${trade.status} on ${trade.symbol} (${trade.timeframe}m)`, {
       entry: `$${trade.entryPrice}`,
       exit: `$${exitPrice.toFixed(4)}`,
       pnl: `${trade.pnlPct!.toFixed(2)}% ($${trade.pnlUsd!.toFixed(2)})`,
@@ -255,10 +260,10 @@ export class PaperTrader {
   }
 
   /**
-   * Check if a position is open for a given symbol.
+   * Check if a position is open for a given symbol and timeframe.
    */
-  hasPosition(symbol: string): boolean {
-    return this.openPositions.has(symbol);
+  hasPosition(symbol: string, timeframe: Timeframe): boolean {
+    return this.openPositions.has(`${symbol}:${timeframe}`);
   }
 
   get openCount(): number {

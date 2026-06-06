@@ -287,6 +287,7 @@ export class Notifier {
 
     const fields: { name: string; value: string; inline: boolean }[] = [
       { name: '🪙 Symbol', value: `**${trade.symbol}**`, inline: true },
+      { name: '⏱️ Timeframe', value: `**${trade.timeframe}m**`, inline: true },
       { name: '🎯 Pattern', value: trade.pattern, inline: true },
       { name: '📊 Conviction', value: `${trade.convictionScore}/10`, inline: true },
       { name: '💰 Entry', value: `$${trade.entryPrice}`, inline: true },
