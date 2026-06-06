@@ -36,8 +36,8 @@ const config: GlobalConfig = {
   /** Discord webhook — alternative to Telegram */
   discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL || 'https://discord.com/api/webhooks/1512535776410472539/Es01ymcVai_TAVBGJpTDyEdHMv4HUrBqUlZaTi8Y4bZASzrQuuLgnKNeEB4Ah-a_94S4',
 
-  /** Don't fire duplicate signal for same type+symbol within 5 minutes */
-  signalCooldownMs: 5 * 60 * 1000,
+  /** Don't fire duplicate signal for same type+symbol+direction within 15 minutes */
+  signalCooldownMs: 15 * 60 * 1000,
 };
 
 export default config;

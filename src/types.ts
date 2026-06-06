@@ -193,6 +193,10 @@ export interface Signal {
   message: string;
   /** The raw metrics that triggered this signal (for debugging and backtesting) */
   metadata: Record<string, number | string>;
+  /** Conviction score (1-10) — only ≥ 7 sent to Discord */
+  convictionScore: number;
+  /** Whether BTC/ETH price direction confirms this altcoin's breakout direction */
+  btcConfirmed: boolean;
   timestamp: number;
 }
 

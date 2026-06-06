@@ -5,10 +5,14 @@
 // The engine now only fires on strict confluence of Macro OI,
 // Volatility compression, Funding rates, and a Micro Trigger.
 // Noise is ignored. Conviction is absolute.
+//
+// v2: Added Conviction Scoring, BTC/ETH "King's Permission"
+//     filter, and direction-aware cooldowns.
 // ============================================================
 
 import { logger } from '../utils/logger.js';
 import { StateAggregator } from './state.js';
+import { scoreSignal } from './convictionScorer.js';
 import type { Signal, SignalType, SymbolConfig, SignalDirection } from '../types.js';
 
 function signalId(type: SignalType, symbol: string): string {
@@ -31,7 +35,32 @@ function hasAbsorptionTrigger(agg: StateAggregator, symbol: string): boolean {
   return volRatio > 2.0 && priceRange < 0.2; // 2x volume but tight range
 }
 
+// ===== HELPER: BTC/ETH "King's Permission" Check =====
 
+/**
+ * Check whether BTC or ETH confirms the direction of an altcoin breakout.
+ * Returns true if at least one of BTC/ETH has a 15m price change in the same direction.
+ * BTC and ETH themselves always return true (they ARE the kings).
+ */
+function checkKingConfirmation(
+  agg: StateAggregator,
+  symbol: string,
+  direction: SignalDirection
+): boolean {
+  // Kings always confirm themselves
+  if (symbol === 'BTCUSDT' || symbol === 'ETHUSDT') return true;
+
+  const btcChange = agg.getPriceChangePct('BTCUSDT', 15);
+  const ethChange = agg.getPriceChangePct('ETHUSDT', 15);
+
+  if (direction === 'BULLISH') {
+    return btcChange > 0.1 || ethChange > 0.1;
+  } else if (direction === 'BEARISH') {
+    return btcChange < -0.1 || ethChange < -0.1;
+  }
+
+  return true; // NEUTRAL direction = no filter
+}
 
 
 // ===== GOD SETUP 1: THE BREAKOUT TRIGGER =====
@@ -99,22 +128,30 @@ function detectBreakout(
   // Ensure Delta matches price direction
   if (direction === 'BULLISH' && delta15m < 0) return null;
   if (direction === 'BEARISH' && delta15m > 0) return null;
-  
+
+  // 6. BTC/ETH "King's Permission" — check but don't block, just tag
+  const btcConfirmed = checkKingConfirmation(agg, symbol, direction);
+
+  // Build the signal (conviction scored later by the evaluator)
+  const metadata: Record<string, number | string> = {
+    oiChange4hPct: oiChange4h,
+    priceChange15mPct: priceChange15m,
+    bodyRatio: bodyRatio,
+    deltaRatio: deltaRatio,
+    fundingRate: state.fundingRate,
+  };
+
   return {
-    id: signalId('COILED_SPRING', symbol), // Keeping internal type name
+    id: signalId('COILED_SPRING', symbol),
     type: 'COILED_SPRING',
     direction,
     urgency: 'CRITICAL',
     symbol,
     price: state.lastPrice,
     message: `🚨 BREAKOUT ALERT: ${symbol} is breaking out of a 4H consolidation! 🚨\n\nPositions built up massively (+${Math.max(oiChange4h, oiChange24h).toFixed(1)}% OI). Price just broke out ${direction} by ${Math.abs(priceChange15m).toFixed(2)}% in a clean 15m full-body candle (Body Ratio: ${(bodyRatio * 100).toFixed(0)}%). Strong aggressive delta confirms the trend.`,
-    metadata: {
-      oiChange4hPct: oiChange4h,
-      priceChange15mPct: priceChange15m,
-      bodyRatio: bodyRatio,
-      deltaRatio: deltaRatio,
-      fundingRate: state.fundingRate,
-    },
+    metadata,
+    convictionScore: 0, // Scored by evaluator below
+    btcConfirmed,
     timestamp: Date.now(),
   };
 }
@@ -147,6 +184,8 @@ function detectBearishTop(
 
   if (!isAbsorbing && !isExhausted) return null;
 
+  const btcConfirmed = checkKingConfirmation(agg, symbol, 'BEARISH');
+
   return {
     id: signalId('EXHAUSTION', symbol),
     type: 'EXHAUSTION',
@@ -160,6 +199,8 @@ function detectBearishTop(
       fundingRate: state.fundingRate,
       microTrigger: isAbsorbing ? 'ABSORPTION' : 'EXHAUSTION',
     },
+    convictionScore: 0, // Scored by evaluator below
+    btcConfirmed,
     timestamp: Date.now(),
   };
 }
@@ -198,9 +239,24 @@ export class AnomalyDetector {
       for (const strategy of strategies) {
         const signal = strategy(this.aggregator, cfg);
         if (signal && !this.isOnCooldown(signal)) {
+          // Score the signal's conviction
+          const scoring = scoreSignal(signal);
+
+          // Apply King's Permission penalty: -2 points if BTC/ETH disagrees
+          const kingPenalty = signal.btcConfirmed ? 0 : 2;
+          signal.convictionScore = Math.max(1, scoring.score - kingPenalty);
+
+          // Add scoring breakdown to metadata for transparency
+          signal.metadata.convictionScore = signal.convictionScore;
+          signal.metadata.kingConfirmed = signal.btcConfirmed ? 'YES' : 'NO';
+
           this.setCooldown(signal);
           
-          logger.signal('ANOMALY', signal.message, signal.metadata);
+          logger.signal('ANOMALY', signal.message, {
+            ...signal.metadata,
+            conviction: `${signal.convictionScore}/10`,
+            kingConfirmed: signal.btcConfirmed ? '✅' : '❌',
+          });
 
           signals.push(signal);
           if (this.onSignalCallback) {
@@ -213,15 +269,19 @@ export class AnomalyDetector {
     return signals;
   }
 
+  // Direction-aware cooldown: type:symbol:direction
+  // This means a BEARISH alert and a BULLISH alert for the same coin
+  // can fire independently (which is useful for reversal detection),
+  // but the same direction won't spam.
   private isOnCooldown(signal: Signal): boolean {
-    const key = `${signal.type}:${signal.symbol}`;
+    const key = `${signal.type}:${signal.symbol}:${signal.direction}`;
     const lastFired = this.signalCooldowns.get(key);
     if (!lastFired) return false;
     return Date.now() - lastFired < this.cooldownMs;
   }
 
   private setCooldown(signal: Signal): void {
-    const key = `${signal.type}:${signal.symbol}`;
+    const key = `${signal.type}:${signal.symbol}:${signal.direction}`;
     this.signalCooldowns.set(key, Date.now());
   }
 }

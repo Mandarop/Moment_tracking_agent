@@ -3,8 +3,12 @@
 //
 // Delivers signals to your phone/desktop via:
 //   1. Telegram Bot API (primary — instant mobile push)
-//   2. Discord Webhook (secondary)
+//   2. Discord Webhook (secondary — now with rich embeds)
 //   3. Console (always — for local monitoring)
+//
+// v2: Conviction-gated Discord embeds.
+//     Only signals scoring ≥ DISCORD_THRESHOLD are sent.
+//     Lower-conviction signals still log to console for review.
 //
 // A systems engineer never makes a network call without:
 //   - Retry logic
@@ -13,13 +17,14 @@
 // ============================================================
 
 import { logger } from '../utils/logger.js';
+import { DISCORD_THRESHOLD } from '../engine/convictionScorer.js';
 import type { Signal } from '../types.js';
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 
-/** Format a signal into a clean Telegram/Discord message */
+/** Format a signal into a clean Telegram/Console message (plain text) */
 function formatSignalMessage(signal: Signal): string {
   const urgencyEmoji: Record<string, string> = {
     LOW: '🟢',
@@ -35,7 +40,7 @@ function formatSignalMessage(signal: Signal): string {
   };
 
   const lines = [
-    `${urgencyEmoji[signal.urgency]} **${signal.urgency}** | ${directionEmoji[signal.direction]} ${signal.direction}`,
+    `${urgencyEmoji[signal.urgency]} **${signal.urgency}** | ${directionEmoji[signal.direction]} ${signal.direction} | 🎯 ${signal.convictionScore}/10`,
     ``,
     signal.message,
     ``,
@@ -55,6 +60,83 @@ function formatSignalMessage(signal: Signal): string {
   }
 
   return lines.join('\n');
+}
+
+/** Build a Discord embed object for a signal */
+function buildDiscordEmbed(signal: Signal): object {
+  const directionEmoji = signal.direction === 'BULLISH' ? '📈' : signal.direction === 'BEARISH' ? '📉' : '➡️';
+  const urgencyEmoji = signal.urgency === 'CRITICAL' ? '🔴' : signal.urgency === 'HIGH' ? '🟠' : '🟡';
+  
+  // Green for bullish, red for bearish, grey for neutral
+  const color = signal.direction === 'BULLISH' ? 0x00ff88 : signal.direction === 'BEARISH' ? 0xff4444 : 0x888888;
+
+  const kingTag = signal.btcConfirmed ? '📈 Agrees ✅' : '⚠️ Diverging';
+
+  // Build clean field list
+  const fields: { name: string; value: string; inline: boolean }[] = [];
+
+  const oiChange = Number(signal.metadata.oiChange4hPct || signal.metadata.priceChange24hPct || 0);
+  if (oiChange !== 0) {
+    fields.push({
+      name: '📊 OI Build-Up',
+      value: `**+${Math.abs(oiChange).toFixed(1)}%** (4H)`,
+      inline: true,
+    });
+  }
+
+  const priceMove = Number(signal.metadata.priceChange15mPct || 0);
+  if (priceMove !== 0) {
+    fields.push({
+      name: '💥 Price Move',
+      value: `**${priceMove >= 0 ? '+' : ''}${priceMove.toFixed(2)}%** (15m)`,
+      inline: true,
+    });
+  }
+
+  const bodyRatio = Number(signal.metadata.bodyRatio || 0);
+  const deltaRatio = Number(signal.metadata.deltaRatio || 0);
+  if (bodyRatio > 0 || deltaRatio > 0) {
+    fields.push({
+      name: '🕯️ Candle Quality',
+      value: `Body: **${(bodyRatio * 100).toFixed(0)}%** | Delta: **${(deltaRatio * 100).toFixed(0)}%**`,
+      inline: true,
+    });
+  }
+
+  const funding = Number(signal.metadata.fundingRate || 0);
+  const fundingLabel = funding === 0 ? 'Neutral' : funding > 0 ? 'Longs Pay' : 'Shorts Pay';
+  const fundingIcon = funding === 0 ? '⚪' : (
+    (signal.direction === 'BULLISH' && funding < 0) || (signal.direction === 'BEARISH' && funding > 0)
+      ? '✅' : '⚠️'
+  );
+  fields.push({
+    name: '💰 Funding',
+    value: `${(funding * 100).toFixed(4)}% (${fundingLabel}) ${fundingIcon}`,
+    inline: true,
+  });
+
+  // King's Permission (only for altcoins)
+  if (signal.symbol !== 'BTCUSDT' && signal.symbol !== 'ETHUSDT') {
+    fields.push({
+      name: '👑 BTC Trend',
+      value: kingTag,
+      inline: true,
+    });
+  }
+
+  return {
+    embeds: [{
+      title: `${urgencyEmoji} ${signal.urgency} | ${directionEmoji} ${signal.direction} | 🎯 ${signal.convictionScore}/10`,
+      description: signal.message,
+      color,
+      fields,
+      footer: {
+        text: `💰 $${signal.price.toLocaleString()} | ${new Date(signal.timestamp).toISOString().replace('T', ' ').slice(0, 16)} UTC`,
+      },
+      timestamp: new Date(signal.timestamp).toISOString(),
+    }],
+    username: 'Before Move 🔥',
+  };
 }
 
 /** Send with retry logic */
@@ -112,7 +194,7 @@ export class Notifier {
     }
 
     if (this.discordWebhookUrl) {
-      logger.info('NOTIFY', '✅ Discord notifications enabled');
+      logger.info('NOTIFY', `✅ Discord notifications enabled (threshold: ≥${DISCORD_THRESHOLD}/10)`);
     }
   }
 
@@ -122,7 +204,7 @@ export class Notifier {
 
     const message = formatSignalMessage(signal);
 
-    // Always log to console
+    // Always log to console (all conviction levels)
     console.log('\n' + '='.repeat(60));
     console.log(message);
     console.log('='.repeat(60) + '\n');
@@ -134,8 +216,11 @@ export class Notifier {
       promises.push(this.sendTelegram(message));
     }
 
-    if (this.discordWebhookUrl) {
-      promises.push(this.sendDiscord(message));
+    // CONVICTION GATE: Only send to Discord if score meets threshold
+    if (this.discordWebhookUrl && signal.convictionScore >= DISCORD_THRESHOLD) {
+      promises.push(this.sendDiscord(signal));
+    } else if (this.discordWebhookUrl && signal.convictionScore < DISCORD_THRESHOLD) {
+      logger.info('NOTIFY', `⏭️ Skipping Discord for ${signal.symbol} (conviction: ${signal.convictionScore}/10, need ≥${DISCORD_THRESHOLD})`);
     }
 
     await Promise.allSettled(promises);
@@ -164,23 +249,20 @@ export class Notifier {
     }
   }
 
-  /** Send via Discord Webhook */
-  private async sendDiscord(message: string): Promise<void> {
+  /** Send via Discord Webhook (rich embed format) */
+  private async sendDiscord(signal: Signal): Promise<void> {
     if (!this.discordWebhookUrl) return;
 
-    const body = {
-      content: message,
-      username: 'Before Move 🔥',
-    };
+    const embed = buildDiscordEmbed(signal);
 
     const response = await fetchWithRetry(this.discordWebhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(embed),
     });
 
     if (response) {
-      logger.info('NOTIFY', '✅ Discord message sent');
+      logger.info('NOTIFY', `✅ Discord embed sent (${signal.symbol} — ${signal.convictionScore}/10)`);
     } else {
       logger.error('NOTIFY', '❌ Failed to send Discord message after all retries');
     }

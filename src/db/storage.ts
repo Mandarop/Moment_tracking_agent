@@ -84,6 +84,8 @@ export class Storage {
         price REAL NOT NULL,
         message TEXT NOT NULL,
         metadata TEXT NOT NULL,
+        conviction_score INTEGER NOT NULL,
+        btc_confirmed INTEGER NOT NULL,
         timestamp INTEGER NOT NULL,
         created_at TEXT DEFAULT (datetime('now'))
       )
@@ -128,8 +130,8 @@ export class Storage {
   /** Persist a signal */
   saveSignal(signal: Signal): void {
     this.db.run(
-      `INSERT OR IGNORE INTO signals (id, type, direction, urgency, symbol, price, message, metadata, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO signals (id, type, direction, urgency, symbol, price, message, metadata, conviction_score, btc_confirmed, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         signal.id,
         signal.type,
@@ -139,6 +141,8 @@ export class Storage {
         signal.price,
         signal.message,
         JSON.stringify(signal.metadata),
+        signal.convictionScore,
+        signal.btcConfirmed ? 1 : 0,
         signal.timestamp,
       ]
     );
@@ -180,7 +184,7 @@ export class Storage {
   /** Get recent signals for display */
   getRecentSignals(limit: number = 50): Signal[] {
     const results = this.db.exec(
-      `SELECT id, type, direction, urgency, symbol, price, message, metadata, timestamp
+      `SELECT id, type, direction, urgency, symbol, price, message, metadata, conviction_score, btc_confirmed, timestamp
        FROM signals ORDER BY timestamp DESC LIMIT ${limit}`
     );
 
@@ -196,7 +200,9 @@ export class Storage {
       price: row[5] as number,
       message: row[6] as string,
       metadata: JSON.parse(row[7] as string),
-      timestamp: row[8] as number,
+      convictionScore: row[8] as number,
+      btcConfirmed: (row[9] as number) === 1,
+      timestamp: row[10] as number,
     }));
   }
 
